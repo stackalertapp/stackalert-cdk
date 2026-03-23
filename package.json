@@ -1,0 +1,27 @@
+{
+  "name": "stackalert-cdk",
+  "version": "0.1.0",
+  "description": "AWS CDK infrastructure for StackAlert — cost spike detection Lambda",
+  "scripts": {
+    "build": "tsc",
+    "watch": "tsc -w",
+    "test": "jest",
+    "cdk": "cdk",
+    "synth": "cdk synth",
+    "diff": "cdk diff",
+    "deploy": "cdk deploy --require-approval never",
+    "destroy": "cdk destroy"
+  },
+  "devDependencies": {
+    "@types/jest": "^29.5.14",
+    "@types/node": "^22.13.14",
+    "aws-cdk": "^2.1006.0",
+    "jest": "^29.7.0",
+    "ts-jest": "^29.2.6",
+    "typescript": "^5.8.2"
+  },
+  "dependencies": {
+    "aws-cdk-lib": "^2.1006.0",
+    "constructs": "^10.4.2"
+  }
+}
