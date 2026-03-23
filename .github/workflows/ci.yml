@@ -57,7 +57,7 @@ jobs:
         run: npm audit --audit-level=high
 
       - name: Trivy filesystem scan
-        uses: aquasecurity/trivy-action@0.30.0
+        uses: aquasecurity/trivy-action@0.35.0
         with:
           scan-type: fs
           format: sarif
@@ -77,7 +77,7 @@ jobs:
           CDK_DEFAULT_ACCOUNT: "123456789012"
 
       - name: Trivy CDK config scan
-        uses: aquasecurity/trivy-action@0.30.0
+        uses: aquasecurity/trivy-action@0.35.0
         with:
           scan-type: config
           scan-ref: cdk.out/
@@ -110,4 +110,4 @@ jobs:
         run: npx tsc --noEmit
 
       - name: ESLint
-        run: npx eslint . --ext .ts
+        run: npx eslint .

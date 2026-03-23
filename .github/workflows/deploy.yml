@@ -21,8 +21,11 @@ env:
   ENVIRONMENT: ${{ github.event.inputs.environment || 'prod' }}
   ARTIFACT_S3_BUCKET: ${{ vars.ARTIFACT_S3_BUCKET }}
   ARTIFACT_S3_KEY: ${{ vars.ARTIFACT_S3_KEY || 'stackalert-lambda/latest.zip' }}
-  TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+  NOTIFICATION_CHANNELS: ${{ vars.NOTIFICATION_CHANNELS || 'slack' }}
+  SLACK_WEBHOOK_URL: ${{ secrets.SLACK_WEBHOOK_URL }}
   TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+  TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+  PAGERDUTY_ROUTING_KEY: ${{ secrets.PAGERDUTY_ROUTING_KEY }}
   CROSS_ACCOUNT_ROLE_ARN: ${{ vars.CROSS_ACCOUNT_ROLE_ARN }}
   SPIKE_THRESHOLD_PCT: ${{ vars.SPIKE_THRESHOLD_PCT || '50' }}
 

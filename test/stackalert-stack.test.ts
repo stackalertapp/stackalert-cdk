@@ -6,6 +6,7 @@ const defaultProps = {
   environment: "test",
   artifactS3Bucket: "my-artifacts",
   artifactS3Key: "stackalert-lambda/latest.zip",
+  notificationChannels: "telegram",
   telegramChatId: "-1001234567890",
   telegramBotToken: "test-token",
   env: { account: "123456789012", region: "eu-central-1" },
