@@ -1,5 +1,8 @@
 # stackalert-cdk
 
+[![CI](https://github.com/stackalertapp/stackalert-cdk/actions/workflows/ci.yml/badge.svg)](https://github.com/stackalertapp/stackalert-cdk/actions/workflows/ci.yml)
+[![Deploy](https://github.com/stackalertapp/stackalert-cdk/actions/workflows/deploy.yml/badge.svg)](https://github.com/stackalertapp/stackalert-cdk/actions/workflows/deploy.yml)
+
 AWS CDK v2 (TypeScript) infrastructure for [StackAlert](https://github.com/stackalertapp/stackalert-lambda) — AWS cost spike detection with alerts via **Slack**, **Telegram**, and/or **PagerDuty**.
 
 ## Resources Created
