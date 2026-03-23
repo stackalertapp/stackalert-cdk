@@ -23,8 +23,10 @@ import { Construct } from "constructs";
  *   environment: 'prod',
  *   artifactS3Bucket: 'my-artifacts',
  *   artifactS3Key: 'stackalert-lambda/latest.zip',
+ *   notificationChannels: 'slack,telegram',
+ *   slackWebhookUrl: 'https://hooks.slack.com/...',
+ *   telegramBotToken: 'bot123456:ABC-secret',
  *   telegramChatId: '-1001234567890',
- *   telegramBotToken: '/stackalert/prod/telegram-bot-token',
  *   spikeThresholdPct: 50,
  *   env: { account: '123456789012', region: 'eu-central-1' },
  * });
@@ -55,21 +57,39 @@ export interface StackAlertStackProps extends cdk.StackProps {
   artifactS3Key: string;
 
   /**
-   * Telegram chat or group ID that will receive cost alerts.
+   * Comma-separated list of notification channels to enable.
+   * Valid values: `slack`, `telegram`, `pagerduty`
    *
-   * Obtain this by adding the bot to the target chat and calling
-   * `https://api.telegram.org/bot<token>/getUpdates`.
+   * SSM parameters and IAM permissions are created only for the listed channels.
+   *
+   * @default "slack"
+   * @example "slack,telegram,pagerduty"
    */
-  telegramChatId: string;
+  notificationChannels?: string;
 
   /**
-   * Telegram bot token stored in SSM Parameter Store as a SecureString.
-   *
-   * The value is written to SSM by CDK and the Lambda function reads it
-   * at runtime via `ssm:GetParameter`. Never pass a raw token here in
-   * production — use a CDK context variable or CI secret.
+   * Slack incoming webhook URL.
+   * Required when `"slack"` is in {@link notificationChannels}.
    */
-  telegramBotToken: string;
+  slackWebhookUrl?: string;
+
+  /**
+   * Telegram bot token.
+   * Required when `"telegram"` is in {@link notificationChannels}.
+   */
+  telegramBotToken?: string;
+
+  /**
+   * Telegram chat or group ID that will receive cost alerts.
+   * Required when `"telegram"` is in {@link notificationChannels}.
+   */
+  telegramChatId?: string;
+
+  /**
+   * PagerDuty Events API v2 routing/integration key.
+   * Required when `"pagerduty"` is in {@link notificationChannels}.
+   */
+  pagerdutyRoutingKey?: string;
 
   /**
    * Optional IAM role ARN in a secondary AWS account for cross-account
@@ -151,7 +171,7 @@ export interface StackAlertStackProps extends cdk.StackProps {
  * - **Lambda function** — Rust binary on `provided.al2023` / `arm64`
  * - **IAM execution role** — least-privilege; scoped to specific log group,
  *   SSM parameter, and Cost Explorer read-only
- * - **SSM SecureString parameter** — stores the Telegram bot token
+ * - **SSM parameters** — per-channel secrets (Slack/Telegram/PagerDuty), created conditionally
  * - **CloudWatch log group** — structured JSON logs with configurable retention
  * - **EventBridge rules** — spike check (default every 6 h) + daily digest (08:00 UTC)
  * - **SQS Dead Letter Queue** — captures failed Lambda invocations
@@ -217,8 +237,11 @@ export class StackAlertStack extends cdk.Stack {
       environment,
       artifactS3Bucket,
       artifactS3Key,
-      telegramChatId,
-      telegramBotToken,
+      notificationChannels = "slack",
+      slackWebhookUrl = "",
+      telegramBotToken = "",
+      telegramChatId = "",
+      pagerdutyRoutingKey = "",
       crossAccountRoleArn,
       spikeThresholdPct = 50,
       spikeSchedule = events.Schedule.rate(cdk.Duration.hours(6)),
@@ -229,15 +252,41 @@ export class StackAlertStack extends cdk.Stack {
       reservedConcurrentExecutions = 2,
     } = props;
 
+    // Parse active channels for conditional resource creation
+    const channels = notificationChannels.split(",").map((c) => c.trim().toLowerCase());
+
     // ============================================================
-    // SSM Parameter: Telegram bot token (SecureString)
+    // SSM Parameters: per-channel secrets (created conditionally)
+    // NOTE: CDK StringParameter stores as String type (not SecureString).
+    // Rotate sensitive values directly in SSM console after first deploy.
     // ============================================================
-    const botTokenParam = new ssm.StringParameter(this, "TelegramBotToken", {
-      parameterName: `/stackalert/${environment}/telegram-bot-token`,
-      description: "StackAlert Telegram bot token — managed by CDK",
-      stringValue: telegramBotToken,
-      tier: ssm.ParameterTier.STANDARD,
-    });
+
+    const slackWebhookUrlParam = channels.includes("slack")
+      ? new ssm.StringParameter(this, "SlackWebhookUrl", {
+          parameterName: `/stackalert/${environment}/slack-webhook-url`,
+          description: "StackAlert Slack incoming webhook URL — managed by CDK",
+          stringValue: slackWebhookUrl || "PLACEHOLDER",
+          tier: ssm.ParameterTier.STANDARD,
+        })
+      : undefined;
+
+    const telegramBotTokenParam = channels.includes("telegram")
+      ? new ssm.StringParameter(this, "TelegramBotToken", {
+          parameterName: `/stackalert/${environment}/telegram-bot-token`,
+          description: "StackAlert Telegram bot token — managed by CDK",
+          stringValue: telegramBotToken || "PLACEHOLDER",
+          tier: ssm.ParameterTier.STANDARD,
+        })
+      : undefined;
+
+    const pagerdutyRoutingKeyParam = channels.includes("pagerduty")
+      ? new ssm.StringParameter(this, "PagerDutyRoutingKey", {
+          parameterName: `/stackalert/${environment}/pagerduty-routing-key`,
+          description: "StackAlert PagerDuty Events API v2 routing key — managed by CDK",
+          stringValue: pagerdutyRoutingKey || "PLACEHOLDER",
+          tier: ssm.ParameterTier.STANDARD,
+        })
+      : undefined;
 
     // ============================================================
     // CloudWatch Log Group: structured JSON logs
@@ -267,15 +316,23 @@ export class StackAlertStack extends cdk.Stack {
       })
     );
 
-    // SSM — read the specific bot token parameter only
-    this.executionRole.addToPolicy(
-      new iam.PolicyStatement({
-        sid: "AllowSSMGetBotToken",
-        effect: iam.Effect.ALLOW,
-        actions: ["ssm:GetParameter"],
-        resources: [botTokenParam.parameterArn],
-      })
-    );
+    // SSM — read only the channel params that were created
+    const ssmParamArns = [
+      slackWebhookUrlParam?.parameterArn,
+      telegramBotTokenParam?.parameterArn,
+      pagerdutyRoutingKeyParam?.parameterArn,
+    ].filter((arn): arn is string => arn !== undefined);
+
+    if (ssmParamArns.length > 0) {
+      this.executionRole.addToPolicy(
+        new iam.PolicyStatement({
+          sid: "AllowSSMGetChannelSecrets",
+          effect: iam.Effect.ALLOW,
+          actions: ["ssm:GetParameter"],
+          resources: ssmParamArns,
+        })
+      );
+    }
 
     // KMS — decrypt SSM SecureString with AWS managed key
     this.executionRole.addToPolicy(
@@ -335,7 +392,7 @@ export class StackAlertStack extends cdk.Stack {
     this.lambdaFunction = new lambda.Function(this, "Function", {
       functionName: `stackalert-${environment}`,
       description:
-        "StackAlert — AWS cost spike detector. Alerts via Telegram when spend exceeds threshold.",
+        "StackAlert — AWS cost spike detector. Alerts via Slack, Telegram, and/or PagerDuty when spend exceeds threshold.",
       code: lambda.Code.fromBucket(artifactBucket, artifactS3Key),
       handler: "bootstrap", // Rust Lambda convention
       runtime: lambda.Runtime.PROVIDED_AL2023,
@@ -348,8 +405,15 @@ export class StackAlertStack extends cdk.Stack {
       reservedConcurrentExecutions,
       deadLetterQueue: this.dlq,
       environment: {
-        TELEGRAM_BOT_TOKEN_SSM_PARAM: botTokenParam.parameterName,
+        // Which channels to fan-out to (comma-separated)
+        NOTIFICATION_CHANNELS: notificationChannels,
+
+        // Per-channel credentials — Lambda reads these directly from env vars
+        SLACK_WEBHOOK_URL: slackWebhookUrl,
+        TELEGRAM_BOT_TOKEN: telegramBotToken,
         TELEGRAM_CHAT_ID: telegramChatId,
+        PAGERDUTY_ROUTING_KEY: pagerdutyRoutingKey,
+
         SPIKE_THRESHOLD_PCT: spikeThresholdPct.toString(),
         CROSS_ACCOUNT_ROLE_ARN: crossAccountRoleArn ?? "",
         RUST_LOG: "stackalert_lambda=info,aws_sdk=warn",
@@ -370,7 +434,7 @@ export class StackAlertStack extends cdk.Stack {
 
     spikeRule.addTarget(
       new targets.LambdaFunction(this.lambdaFunction, {
-        event: events.RuleTargetInput.fromObject({ mode: "spike" }),
+        event: events.RuleTargetInput.fromObject({}),
       })
     );
 
@@ -383,7 +447,7 @@ export class StackAlertStack extends cdk.Stack {
 
     digestRule.addTarget(
       new targets.LambdaFunction(this.lambdaFunction, {
-        event: events.RuleTargetInput.fromObject({ mode: "digest" }),
+        event: events.RuleTargetInput.fromObject({}),
       })
     );
 
@@ -447,9 +511,9 @@ export class StackAlertStack extends cdk.Stack {
       description: "Lambda execution IAM role ARN",
     });
 
-    new cdk.CfnOutput(this, "SSMParameterName", {
-      value: botTokenParam.parameterName,
-      description: "SSM parameter name for Telegram bot token",
+    new cdk.CfnOutput(this, "NotificationChannels", {
+      value: notificationChannels,
+      description: "Active notification channels",
     });
 
     new cdk.CfnOutput(this, "LogGroupName", {
@@ -458,7 +522,7 @@ export class StackAlertStack extends cdk.Stack {
     });
 
     new cdk.CfnOutput(this, "InvokeSpikeCommand", {
-      value: `aws lambda invoke --function-name ${this.lambdaFunction.functionName} --payload '{"mode":"spike"}' --cli-binary-format raw-in-base64-out /tmp/out.json && cat /tmp/out.json`,
+      value: `aws lambda invoke --function-name ${this.lambdaFunction.functionName} --payload '{}' --cli-binary-format raw-in-base64-out /tmp/out.json && cat /tmp/out.json`,
       description: "AWS CLI command to trigger a spike check",
     });
 

@@ -20,9 +20,14 @@ new StackAlertStack(app, `StackAlert-${environment}`, {
   artifactS3Bucket: app.node.tryGetContext("artifactS3Bucket") ?? process.env.ARTIFACT_S3_BUCKET ?? "",
   artifactS3Key: app.node.tryGetContext("artifactS3Key") ?? process.env.ARTIFACT_S3_KEY ?? "stackalert-lambda/latest.zip",
 
-  // Telegram config (pass via env vars in CI — never commit to source)
-  telegramChatId: process.env.TELEGRAM_CHAT_ID ?? "",
+  // Notification channels (comma-separated: slack, telegram, pagerduty)
+  notificationChannels: process.env.NOTIFICATION_CHANNELS ?? "slack",
+
+  // Per-channel credentials (pass via env vars in CI — never commit to source)
+  slackWebhookUrl: process.env.SLACK_WEBHOOK_URL ?? "",
   telegramBotToken: process.env.TELEGRAM_BOT_TOKEN ?? "",
+  telegramChatId: process.env.TELEGRAM_CHAT_ID ?? "",
+  pagerdutyRoutingKey: process.env.PAGERDUTY_ROUTING_KEY ?? "",
 
   // Optional: cross-account monitoring
   crossAccountRoleArn: process.env.CROSS_ACCOUNT_ROLE_ARN,
