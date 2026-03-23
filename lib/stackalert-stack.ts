@@ -6,6 +6,9 @@ import * as events from "aws-cdk-lib/aws-events";
 import * as targets from "aws-cdk-lib/aws-events-targets";
 import * as ssm from "aws-cdk-lib/aws-ssm";
 import * as s3 from "aws-cdk-lib/aws-s3";
+import * as sqs from 'aws-cdk-lib/aws-sqs';
+import * as cloudwatch from 'aws-cdk-lib/aws-cloudwatch';
+import { NagSuppressions } from 'cdk-nag';
 import { Construct } from "constructs";
 
 /**
@@ -128,6 +131,12 @@ export interface StackAlertStackProps extends cdk.StackProps {
    * @default logs.RetentionDays.ONE_MONTH (30 days)
    */
   logRetentionDays?: logs.RetentionDays;
+
+  /**
+   * Maximum concurrent Lambda executions. Prevents runaway invocations.
+   * @default 2
+   */
+  reservedConcurrentExecutions?: number;
 }
 
 /**
@@ -145,12 +154,16 @@ export interface StackAlertStackProps extends cdk.StackProps {
  * - **SSM SecureString parameter** — stores the Telegram bot token
  * - **CloudWatch log group** — structured JSON logs with configurable retention
  * - **EventBridge rules** — spike check (default every 6 h) + daily digest (08:00 UTC)
+ * - **SQS Dead Letter Queue** — captures failed Lambda invocations
+ * - **CloudWatch alarms** — errors, throttles, and DLQ depth
  *
  * ## Public API
  *
  * After deployment the following properties are available for cross-stack references:
  * - {@link lambdaFunction} — the Lambda `Function` object
  * - {@link executionRole} — the Lambda execution `Role` object
+ * - {@link dlq} — the SQS Dead Letter Queue
+ * - {@link errorAlarm} — the CloudWatch Lambda error alarm
  *
  * @example
  * ```typescript
@@ -187,6 +200,16 @@ export class StackAlertStack extends cdk.Stack {
    */
   public readonly executionRole: iam.Role;
 
+  /**
+   * The SQS Dead Letter Queue for failed Lambda invocations.
+   */
+  public readonly dlq: sqs.Queue;
+
+  /**
+   * The CloudWatch alarm for Lambda errors.
+   */
+  public readonly errorAlarm: cloudwatch.Alarm;
+
   constructor(scope: Construct, id: string, props: StackAlertStackProps) {
     super(scope, id, props);
 
@@ -203,6 +226,7 @@ export class StackAlertStack extends cdk.Stack {
       lambdaMemoryMb = 256,
       lambdaTimeoutSeconds = 60,
       logRetentionDays = logs.RetentionDays.ONE_MONTH,
+      reservedConcurrentExecutions = 2,
     } = props;
 
     // ============================================================
@@ -288,6 +312,18 @@ export class StackAlertStack extends cdk.Stack {
     }
 
     // ============================================================
+    // SQS Dead Letter Queue — catches failed Lambda invocations
+    // ============================================================
+    this.dlq = new sqs.Queue(this, 'DLQ', {
+      queueName: `stackalert-${environment}-dlq`,
+      retentionPeriod: cdk.Duration.days(14),
+      encryption: sqs.QueueEncryption.SQS_MANAGED,
+    });
+
+    // Grant Lambda execution role permission to send to DLQ
+    this.dlq.grantSendMessages(this.executionRole);
+
+    // ============================================================
     // Lambda Function: StackAlert (Rust, arm64, provided.al2023)
     // ============================================================
     const artifactBucket = s3.Bucket.fromBucketName(
@@ -309,12 +345,15 @@ export class StackAlertStack extends cdk.Stack {
       timeout: cdk.Duration.seconds(lambdaTimeoutSeconds),
       logGroup,
       loggingFormat: lambda.LoggingFormat.JSON,
+      reservedConcurrentExecutions,
+      deadLetterQueue: this.dlq,
       environment: {
         TELEGRAM_BOT_TOKEN_SSM_PARAM: botTokenParam.parameterName,
         TELEGRAM_CHAT_ID: telegramChatId,
         SPIKE_THRESHOLD_PCT: spikeThresholdPct.toString(),
         CROSS_ACCOUNT_ROLE_ARN: crossAccountRoleArn ?? "",
         RUST_LOG: "stackalert_lambda=info,aws_sdk=warn",
+        DLQ_URL: this.dlq.queueUrl,
       },
     });
 
@@ -349,6 +388,48 @@ export class StackAlertStack extends cdk.Stack {
     );
 
     // ============================================================
+    // CloudWatch Alarms
+    // ============================================================
+    this.errorAlarm = new cloudwatch.Alarm(this, 'LambdaErrorAlarm', {
+      alarmName: `stackalert-${environment}-errors`,
+      metric: this.lambdaFunction.metricErrors({
+        period: cdk.Duration.minutes(5),
+        statistic: 'Sum',
+      }),
+      threshold: 0,
+      evaluationPeriods: 1,
+      comparisonOperator: cloudwatch.ComparisonOperator.GREATER_THAN_THRESHOLD,
+      treatMissingData: cloudwatch.TreatMissingData.NOT_BREACHING,
+      alarmDescription: 'StackAlert Lambda returned errors',
+    });
+
+    const throttleAlarm = new cloudwatch.Alarm(this, 'LambdaThrottleAlarm', {
+      alarmName: `stackalert-${environment}-throttles`,
+      metric: this.lambdaFunction.metricThrottles({
+        period: cdk.Duration.minutes(5),
+        statistic: 'Sum',
+      }),
+      threshold: 0,
+      evaluationPeriods: 1,
+      comparisonOperator: cloudwatch.ComparisonOperator.GREATER_THAN_THRESHOLD,
+      treatMissingData: cloudwatch.TreatMissingData.NOT_BREACHING,
+      alarmDescription: 'StackAlert Lambda is being throttled',
+    });
+
+    const dlqAlarm = new cloudwatch.Alarm(this, 'DLQAlarm', {
+      alarmName: `stackalert-${environment}-dlq-depth`,
+      metric: this.dlq.metricNumberOfMessagesSent({
+        period: cdk.Duration.minutes(5),
+        statistic: 'Sum',
+      }),
+      threshold: 0,
+      evaluationPeriods: 1,
+      comparisonOperator: cloudwatch.ComparisonOperator.GREATER_THAN_THRESHOLD,
+      treatMissingData: cloudwatch.TreatMissingData.NOT_BREACHING,
+      alarmDescription: 'StackAlert DLQ received messages — Lambda failed silently',
+    });
+
+    // ============================================================
     // CloudFormation Outputs
     // ============================================================
     new cdk.CfnOutput(this, "LambdaFunctionName", {
@@ -380,5 +461,40 @@ export class StackAlertStack extends cdk.Stack {
       value: `aws lambda invoke --function-name ${this.lambdaFunction.functionName} --payload '{"mode":"spike"}' --cli-binary-format raw-in-base64-out /tmp/out.json && cat /tmp/out.json`,
       description: "AWS CLI command to trigger a spike check",
     });
+
+    new cdk.CfnOutput(this, 'DLQUrl', {
+      value: this.dlq.queueUrl,
+      description: 'Dead Letter Queue URL for failed Lambda invocations',
+    });
+
+    new cdk.CfnOutput(this, 'ErrorAlarmArn', {
+      value: this.errorAlarm.alarmArn,
+      description: 'CloudWatch alarm ARN for Lambda errors',
+    });
+
+    // ============================================================
+    // Resource tagging
+    // ============================================================
+    cdk.Tags.of(this).add('Project', 'StackAlert');
+    cdk.Tags.of(this).add('ManagedBy', 'CDK');
+    cdk.Tags.of(this).add('Environment', environment);
+
+    // ============================================================
+    // cdk-nag suppressions for accepted findings
+    // ============================================================
+    NagSuppressions.addStackSuppressions(this, [
+      {
+        id: 'AwsSolutions-IAM5',
+        reason: 'Cost Explorer GetCostAndUsage does not support resource-level permissions — wildcard required by AWS.',
+      },
+      {
+        id: 'AwsSolutions-L1',
+        reason: 'Lambda uses provided.al2023 custom runtime (Rust binary) — managed runtime versions do not apply.',
+      },
+    ]);
+
+    // Suppress unused variable warnings for alarms used only for side effects
+    void throttleAlarm;
+    void dlqAlarm;
   }
 }
