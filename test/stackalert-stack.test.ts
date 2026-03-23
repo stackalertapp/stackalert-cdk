@@ -202,4 +202,100 @@ describe("StackAlertStack", () => {
     // Tags are applied at stack level via CDK aspects
     expect(stackTags).toBeDefined();
   });
+
+  test("Lambda execution role trust policy has SourceAccount condition", () => {
+    const template = buildStack();
+
+    template.hasResourceProperties("AWS::IAM::Role", {
+      RoleName: "stackalert-lambda-test",
+      AssumeRolePolicyDocument: Match.objectLike({
+        Statement: Match.arrayWith([
+          Match.objectLike({
+            Action: "sts:AssumeRole",
+            Effect: "Allow",
+            Principal: { Service: "lambda.amazonaws.com" },
+            Condition: {
+              StringEquals: { "aws:SourceAccount": "123456789012" },
+            },
+          }),
+        ]),
+      }),
+    });
+  });
+
+  test("IAM role has X-Ray tracing permission", () => {
+    const template = buildStack();
+
+    template.hasResourceProperties("AWS::IAM::Policy", {
+      PolicyDocument: {
+        Statement: Match.arrayWith([
+          Match.objectLike({
+            Sid: "AllowXRayTracing",
+            Action: Match.arrayWith([
+              "xray:PutTraceSegments",
+              "xray:PutTelemetryRecords",
+            ]),
+            Effect: "Allow",
+            Resource: "*",
+          }),
+        ]),
+      },
+    });
+  });
+
+  test("Lambda has X-Ray active tracing enabled", () => {
+    const template = buildStack();
+
+    template.hasResourceProperties("AWS::Lambda::Function", {
+      TracingConfig: { Mode: "Active" },
+    });
+  });
+
+  test("no deploy role created when createDeployRole is false (default)", () => {
+    const template = buildStack();
+
+    // Should have exactly one IAM role: the Lambda execution role
+    const roles = template.findResources("AWS::IAM::Role");
+    const roleNames = Object.values(roles).map(
+      (r: any) => r.Properties.RoleName
+    );
+    expect(roleNames).not.toContain("stackalert-deploy-test");
+  });
+
+  test("creates deploy role when createDeployRole is true", () => {
+    const template = buildStack({
+      createDeployRole: true,
+      githubOrg: "stackalertapp",
+      githubRepo: "stackalert-cdk",
+    });
+
+    template.hasResourceProperties("AWS::IAM::Role", {
+      RoleName: "stackalert-deploy-test",
+      MaxSessionDuration: 3600,
+    });
+  });
+
+  test("deploy role is scoped to the specified GitHub repo", () => {
+    const template = buildStack({
+      createDeployRole: true,
+      githubOrg: "stackalertapp",
+      githubRepo: "stackalert-cdk",
+    });
+
+    template.hasResourceProperties("AWS::IAM::Role", {
+      RoleName: "stackalert-deploy-test",
+      AssumeRolePolicyDocument: Match.objectLike({
+        Statement: Match.arrayWith([
+          Match.objectLike({
+            Condition: Match.objectLike({
+              StringLike: {
+                "token.actions.githubusercontent.com:sub":
+                  "repo:stackalertapp/stackalert-cdk:*",
+              },
+            }),
+          }),
+        ]),
+      }),
+    });
+  });
 });

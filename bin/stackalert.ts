@@ -35,6 +35,11 @@ new StackAlertStack(app, `StackAlert-${environment}`, {
   // Alert threshold (default: 50%)
   spikeThresholdPct: parseInt(process.env.SPIKE_THRESHOLD_PCT ?? "50", 10),
 
+  // Optional: GitHub Actions OIDC deploy role (set CREATE_DEPLOY_ROLE=true to enable)
+  createDeployRole: process.env.CREATE_DEPLOY_ROLE === "true",
+  githubOrg: process.env.GITHUB_ORG ?? "",
+  githubRepo: process.env.GITHUB_REPO ?? "",
+
   tags: {
     Project: "stackalert",
     ManagedBy: "cdk",

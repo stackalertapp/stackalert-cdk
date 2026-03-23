@@ -157,6 +157,29 @@ export interface StackAlertStackProps extends cdk.StackProps {
    * @default 2
    */
   reservedConcurrentExecutions?: number;
+
+  /**
+   * When `true`, creates a least-privilege GitHub Actions OIDC deployment role
+   * scoped to CDK bootstrap roles and `stackalert-*` Lambda invocations.
+   *
+   * Requires the GitHub OIDC provider to already exist in the account
+   * and {@link githubOrg} + {@link githubRepo} to be set.
+   *
+   * @default false
+   */
+  createDeployRole?: boolean;
+
+  /**
+   * GitHub organisation or username that owns the repository.
+   * Required when {@link createDeployRole} is `true`.
+   */
+  githubOrg?: string;
+
+  /**
+   * GitHub repository name (without the org prefix).
+   * Required when {@link createDeployRole} is `true`.
+   */
+  githubRepo?: string;
 }
 
 /**
@@ -250,6 +273,9 @@ export class StackAlertStack extends cdk.Stack {
       lambdaTimeoutSeconds = 60,
       logRetentionDays = logs.RetentionDays.ONE_MONTH,
       reservedConcurrentExecutions = 2,
+      createDeployRole = false,
+      githubOrg = "",
+      githubRepo = "",
     } = props;
 
     // Parse active channels for conditional resource creation
@@ -303,7 +329,13 @@ export class StackAlertStack extends cdk.Stack {
     this.executionRole = new iam.Role(this, "LambdaRole", {
       roleName: `stackalert-lambda-${environment}`,
       description: "Execution role for StackAlert Lambda — AWS cost spike detector",
-      assumedBy: new iam.ServicePrincipal("lambda.amazonaws.com"),
+      // Confused-deputy protection: aws:SourceAccount ensures only Lambda
+      // invoked from THIS account can assume the role via the service principal.
+      assumedBy: new iam.ServicePrincipal("lambda.amazonaws.com", {
+        conditions: {
+          StringEquals: { "aws:SourceAccount": this.account },
+        },
+      }),
     });
 
     // CloudWatch Logs — write to the specific log group only
@@ -368,6 +400,16 @@ export class StackAlertStack extends cdk.Stack {
       );
     }
 
+    // X-Ray active tracing — no resource-level permissions supported by AWS
+    this.executionRole.addToPolicy(
+      new iam.PolicyStatement({
+        sid: "AllowXRayTracing",
+        effect: iam.Effect.ALLOW,
+        actions: ["xray:PutTraceSegments", "xray:PutTelemetryRecords"],
+        resources: ["*"],
+      })
+    );
+
     // ============================================================
     // SQS Dead Letter Queue — catches failed Lambda invocations
     // ============================================================
@@ -402,6 +444,7 @@ export class StackAlertStack extends cdk.Stack {
       timeout: cdk.Duration.seconds(lambdaTimeoutSeconds),
       logGroup,
       loggingFormat: lambda.LoggingFormat.JSON,
+      tracing: lambda.Tracing.ACTIVE, // X-Ray active tracing
       reservedConcurrentExecutions,
       deadLetterQueue: this.dlq,
       environment: {
@@ -494,6 +537,70 @@ export class StackAlertStack extends cdk.Stack {
     });
 
     // ============================================================
+    // Optional: GitHub Actions OIDC deployment role
+    // Enable with createDeployRole: true + githubOrg + githubRepo.
+    // Prereq: GitHub OIDC provider must already exist in the account.
+    // ============================================================
+
+    if (createDeployRole && githubOrg && githubRepo) {
+      const githubOidcProvider = iam.OpenIdConnectProvider.fromOpenIdConnectProviderArn(
+        this,
+        "GitHubOIDCProvider",
+        `arn:aws:iam::${this.account}:oidc-provider/token.actions.githubusercontent.com`
+      );
+
+      const deployRole = new iam.Role(this, "DeployRole", {
+        roleName: `stackalert-deploy-${environment}`,
+        description: `GitHub Actions OIDC deployment role for StackAlert - ${environment}`,
+        // Scope the OIDC trust to the exact repo and require correct audience
+        assumedBy: new iam.WebIdentityPrincipal(
+          githubOidcProvider.openIdConnectProviderArn,
+          {
+            StringEquals: {
+              "token.actions.githubusercontent.com:aud": "sts.amazonaws.com",
+            },
+            StringLike: {
+              "token.actions.githubusercontent.com:sub": `repo:${githubOrg}/${githubRepo}:*`,
+            },
+          }
+        ),
+        maxSessionDuration: cdk.Duration.hours(1),
+      });
+
+      // CDK deploy only needs to assume the bootstrap roles — it does NOT need
+      // broad CloudFormation/IAM permissions directly; those live in the CFN exec role.
+      deployRole.addToPolicy(
+        new iam.PolicyStatement({
+          sid: "AssumeCDKBootstrapRoles",
+          effect: iam.Effect.ALLOW,
+          actions: ["sts:AssumeRole"],
+          resources: [
+            `arn:aws:iam::${this.account}:role/cdk-*-deploy-role-${this.account}-${this.region}`,
+            `arn:aws:iam::${this.account}:role/cdk-*-file-publishing-role-${this.account}-${this.region}`,
+            `arn:aws:iam::${this.account}:role/cdk-*-lookup-role-${this.account}-${this.region}`,
+          ],
+        })
+      );
+
+      // Smoke-test job invokes the Lambda directly — scoped to stackalert-* only
+      deployRole.addToPolicy(
+        new iam.PolicyStatement({
+          sid: "InvokeStackAlertLambda",
+          effect: iam.Effect.ALLOW,
+          actions: ["lambda:InvokeFunction"],
+          resources: [
+            `arn:aws:lambda:${this.region}:${this.account}:function:stackalert-*`,
+          ],
+        })
+      );
+
+      new cdk.CfnOutput(this, "DeployRoleArn", {
+        value: deployRole.roleArn,
+        description: "GitHub Actions OIDC deployment role ARN",
+      });
+    }
+
+    // ============================================================
     // CloudFormation Outputs
     // ============================================================
     new cdk.CfnOutput(this, "LambdaFunctionName", {
@@ -549,7 +656,7 @@ export class StackAlertStack extends cdk.Stack {
     NagSuppressions.addStackSuppressions(this, [
       {
         id: 'AwsSolutions-IAM5',
-        reason: 'Cost Explorer GetCostAndUsage does not support resource-level permissions — wildcard required by AWS.',
+        reason: 'Wildcards are required by AWS for Cost Explorer (ce:GetCostAndUsage) and X-Ray (xray:PutTraceSegments, xray:PutTelemetryRecords) — neither service supports resource-level permissions.',
       },
       {
         id: 'AwsSolutions-L1',

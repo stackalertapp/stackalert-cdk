@@ -28,6 +28,9 @@ env:
   PAGERDUTY_ROUTING_KEY: ${{ secrets.PAGERDUTY_ROUTING_KEY }}
   CROSS_ACCOUNT_ROLE_ARN: ${{ vars.CROSS_ACCOUNT_ROLE_ARN }}
   SPIKE_THRESHOLD_PCT: ${{ vars.SPIKE_THRESHOLD_PCT || '50' }}
+  CREATE_DEPLOY_ROLE: ${{ vars.CREATE_DEPLOY_ROLE || 'false' }}
+  GITHUB_ORG: ${{ vars.GITHUB_ORG || github.repository_owner }}
+  GITHUB_REPO: ${{ vars.GITHUB_REPO || github.event.repository.name }}
 
 jobs:
   test:
