@@ -2,6 +2,25 @@
   "name": "stackalert-cdk",
   "version": "0.1.0",
   "description": "AWS CDK infrastructure for StackAlert — cost spike detection Lambda",
+  "main": "lib/index.js",
+  "types": "lib/index.d.ts",
+  "files": [
+    "lib/",
+    "README.md"
+  ],
+  "keywords": [
+    "cdk",
+    "aws",
+    "lambda",
+    "cost",
+    "monitoring",
+    "constructs"
+  ],
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/stackalertapp/stackalert-cdk.git"
+  },
+  "license": "MIT",
   "scripts": {
     "build": "tsc",
     "watch": "tsc -w",
@@ -10,12 +29,18 @@
     "synth": "cdk synth",
     "diff": "cdk diff",
     "deploy": "cdk deploy --require-approval never",
-    "destroy": "cdk destroy"
+    "destroy": "cdk destroy",
+    "lint": "eslint . --ext .ts",
+    "typecheck": "tsc --noEmit",
+    "audit": "npm audit --audit-level=high"
   },
   "devDependencies": {
     "@types/jest": "^29.5.14",
     "@types/node": "^22.13.14",
+    "@typescript-eslint/eslint-plugin": "^8.0.0",
+    "@typescript-eslint/parser": "^8.0.0",
     "aws-cdk": "^2.1006.0",
+    "eslint": "^9.0.0",
     "jest": "^29.7.0",
     "ts-jest": "^29.2.6",
     "typescript": "^5.8.2"
