@@ -56,6 +56,10 @@ jobs:
         env:
           AWS_DEFAULT_REGION: ${{ vars.AWS_REGION || 'eu-central-1' }}
           CDK_DEFAULT_ACCOUNT: ${{ vars.AWS_ACCOUNT_ID }}
+          # Step-level fallback: placeholder allows synth to succeed even when
+          # ARTIFACT_S3_BUCKET var is not configured (e.g. PRs, forks).
+          # No actual S3 access occurs during CDK synth.
+          ARTIFACT_S3_BUCKET: ${{ vars.ARTIFACT_S3_BUCKET || 'placeholder-bucket' }}
 
   deploy:
     name: CDK Deploy
