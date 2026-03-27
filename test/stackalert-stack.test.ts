@@ -106,13 +106,13 @@ describe("StackAlertStack", () => {
     const template = buildStack();
     const policies = template.findResources("AWS::IAM::Policy");
 
-    // eslint-disable-next-line @typescript-eslint/no-explicit-any
     const allStatements = Object.values(policies).flatMap(
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
       (p: any) => p.Properties.PolicyDocument.Statement // CDK Template returns untyped JSON
     );
 
-    // eslint-disable-next-line @typescript-eslint/no-explicit-any
     const stsStatements = allStatements.filter(
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
       (s: any) => s.Action === "sts:AssumeRole"
     );
 
@@ -263,8 +263,8 @@ describe("StackAlertStack", () => {
 
     // Should have exactly one IAM role: the Lambda execution role
     const roles = template.findResources("AWS::IAM::Role");
-    // eslint-disable-next-line @typescript-eslint/no-explicit-any
     const roleNames = Object.values(roles).map(
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
       (r: any) => r.Properties.RoleName // CDK Template returns untyped JSON
     );
     expect(roleNames).not.toContain("stackalert-deploy-test");

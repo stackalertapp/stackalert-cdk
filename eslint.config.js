@@ -27,7 +27,13 @@ module.exports = [
     },
     rules: {
       ...typescriptEslint.configs.recommended.rules,
-      "@typescript-eslint/no-unused-vars": "error",
+      // Allow _-prefixed variables to be unused (intentional CDK side-effect constructs,
+      // unused function params, etc.) — standard TypeScript convention.
+      "@typescript-eslint/no-unused-vars": ["error", {
+        "argsIgnorePattern": "^_",
+        "varsIgnorePattern": "^_",
+        "caughtErrorsIgnorePattern": "^_",
+      }],
       "@typescript-eslint/explicit-function-return-type": "warn",
       "no-console": "warn",
     },
