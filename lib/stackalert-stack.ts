@@ -42,19 +42,45 @@ export interface StackAlertStackProps extends cdk.StackProps {
   environment: string;
 
   /**
+   * Override the Lambda code source directly.
+   *
+   * This is the recommended way to specify the binary — pass any `lambda.Code`
+   * source (local asset, S3, ECR image, etc.):
+   *
+   * ```typescript
+   * // From a local pre-built ZIP (e.g. downloaded from GitHub Releases)
+   * lambdaCode: lambda.Code.fromAsset('./bootstrap.zip')
+   *
+   * // From an S3 bucket
+   * lambdaCode: lambda.Code.fromBucket(myBucket, 'stackalert-lambda/latest.zip')
+   * ```
+   *
+   * Download the latest pre-built binary from:
+   * https://github.com/stackalertapp/stackalert-lambda/releases
+   *
+   * When provided, takes precedence over `artifactS3Bucket` / `artifactS3Key`.
+   * Exactly one of `lambdaCode` or (`artifactS3Bucket` + `artifactS3Key`) must be set.
+   */
+  lambdaCode?: lambda.Code;
+
+  /**
    * Name of the S3 bucket that contains the pre-built Lambda ZIP artifact.
    *
    * The artifact is produced by the `stackalert-lambda` CI pipeline and must
    * be accessible from the AWS account/region where this stack is deployed.
+   *
+   * @deprecated Prefer `lambdaCode: lambda.Code.fromBucket(...)` for an explicit code source.
    */
-  artifactS3Bucket: string;
+  artifactS3Bucket?: string;
 
   /**
    * S3 object key for the Lambda ZIP artifact (e.g. `stackalert-lambda/latest.zip`).
    *
    * Update this value to deploy a new version of the Lambda function.
+   *
+   * @deprecated Prefer `lambdaCode: lambda.Code.fromBucket(...)` for an explicit code source.
    */
-  artifactS3Key: string;
+  artifactS3Key?: string;
 
   /**
    * Comma-separated list of notification channels to enable.
@@ -258,6 +284,7 @@ export class StackAlertStack extends cdk.Stack {
 
     const {
       environment,
+      lambdaCode: lambdaCodeProp,
       artifactS3Bucket,
       artifactS3Key,
       notificationChannels = "slack",
@@ -366,6 +393,20 @@ export class StackAlertStack extends cdk.Stack {
       );
     }
 
+    // SSM — dedup namespace: read/write last-seen timestamps for spike deduplication.
+    // The Lambda writes a timestamp after each alert and checks it before sending
+    // another to enforce the cooldown window (default: 24 h per service).
+    this.executionRole.addToPolicy(
+      new iam.PolicyStatement({
+        sid: "AllowSSMDedupReadWrite",
+        effect: iam.Effect.ALLOW,
+        actions: ["ssm:GetParameter", "ssm:PutParameter"],
+        resources: [
+          `arn:aws:ssm:${this.region}:${this.account}:parameter/stackalert/${environment}/dedup/*`,
+        ],
+      })
+    );
+
     // KMS — decrypt SSM SecureString with AWS managed key
     this.executionRole.addToPolicy(
       new iam.PolicyStatement({
@@ -423,19 +464,36 @@ export class StackAlertStack extends cdk.Stack {
     this.dlq.grantSendMessages(this.executionRole);
 
     // ============================================================
+    // Lambda Code: resolve from explicit override, S3, or fail fast
+    // ============================================================
+    let resolvedCode: lambda.Code;
+    if (lambdaCodeProp) {
+      resolvedCode = lambdaCodeProp;
+    } else if (artifactS3Bucket && artifactS3Key) {
+      const artifactBucket = s3.Bucket.fromBucketName(this, "ArtifactBucket", artifactS3Bucket);
+      resolvedCode = lambda.Code.fromBucket(artifactBucket, artifactS3Key);
+    } else {
+      throw new Error(
+        "StackAlertStackProps: provide either `lambdaCode` or both `artifactS3Bucket` + `artifactS3Key`.\n" +
+        "\n" +
+        "  // Option A — local asset (download from GitHub Releases first)\n" +
+        "  lambdaCode: lambda.Code.fromAsset('./bootstrap.zip')\n" +
+        "\n" +
+        "  // Option B — S3 bucket\n" +
+        "  artifactS3Bucket: 'my-bucket', artifactS3Key: 'stackalert/bootstrap.zip'\n" +
+        "\n" +
+        "Pre-built binaries: https://github.com/stackalertapp/stackalert-lambda/releases"
+      );
+    }
+
+    // ============================================================
     // Lambda Function: StackAlert (Rust, arm64, provided.al2023)
     // ============================================================
-    const artifactBucket = s3.Bucket.fromBucketName(
-      this,
-      "ArtifactBucket",
-      artifactS3Bucket
-    );
-
     this.lambdaFunction = new lambda.Function(this, "Function", {
       functionName: `stackalert-${environment}`,
       description:
         "StackAlert — AWS cost spike detector. Alerts via Slack, Telegram, and/or PagerDuty when spend exceeds threshold.",
-      code: lambda.Code.fromBucket(artifactBucket, artifactS3Key),
+      code: resolvedCode,
       handler: "bootstrap", // Rust Lambda convention
       runtime: lambda.Runtime.PROVIDED_AL2023,
       architecture: lambda.Architecture.ARM_64, // Graviton2: 20% cheaper
@@ -477,7 +535,9 @@ export class StackAlertStack extends cdk.Stack {
 
     spikeRule.addTarget(
       new targets.LambdaFunction(this.lambdaFunction, {
-        event: events.RuleTargetInput.fromObject({}),
+        // Pass mode so the Lambda knows which handler to invoke.
+        // Without this, the Lambda defaults to "spike" mode for both rules.
+        event: events.RuleTargetInput.fromObject({ mode: "spike" }),
       })
     );
 
@@ -490,7 +550,7 @@ export class StackAlertStack extends cdk.Stack {
 
     digestRule.addTarget(
       new targets.LambdaFunction(this.lambdaFunction, {
-        event: events.RuleTargetInput.fromObject({}),
+        event: events.RuleTargetInput.fromObject({ mode: "digest" }),
       })
     );
 
@@ -510,7 +570,9 @@ export class StackAlertStack extends cdk.Stack {
       alarmDescription: 'StackAlert Lambda returned errors',
     });
 
-    const throttleAlarm = new cloudwatch.Alarm(this, 'LambdaThrottleAlarm', {
+    // Underscore prefix = intentionally not exposed as a public property.
+    // CDK constructs are wired into the stack via `this` (the scope), not the variable.
+    const _throttleAlarm = new cloudwatch.Alarm(this, 'LambdaThrottleAlarm', {
       alarmName: `stackalert-${environment}-throttles`,
       metric: this.lambdaFunction.metricThrottles({
         period: cdk.Duration.minutes(5),
@@ -523,7 +585,7 @@ export class StackAlertStack extends cdk.Stack {
       alarmDescription: 'StackAlert Lambda is being throttled',
     });
 
-    const dlqAlarm = new cloudwatch.Alarm(this, 'DLQAlarm', {
+    const _dlqAlarm = new cloudwatch.Alarm(this, 'DLQAlarm', {
       alarmName: `stackalert-${environment}-dlq-depth`,
       metric: this.dlq.metricNumberOfMessagesSent({
         period: cdk.Duration.minutes(5),
@@ -664,8 +726,5 @@ export class StackAlertStack extends cdk.Stack {
       },
     ]);
 
-    // Suppress unused variable warnings for alarms used only for side effects
-    void throttleAlarm;
-    void dlqAlarm;
   }
 }

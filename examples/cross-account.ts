@@ -19,6 +19,7 @@
  */
 
 import * as cdk from "aws-cdk-lib";
+import * as lambda from "aws-cdk-lib/aws-lambda";
 import * as events from "aws-cdk-lib/aws-events";
 import { StackAlertStack } from "../lib/stackalert-stack";
 
@@ -33,8 +34,9 @@ new StackAlertStack(app, "StackAlert-CrossAccount", {
 
   environment: "prod",
 
-  artifactS3Bucket: process.env.ARTIFACT_S3_BUCKET!,
-  artifactS3Key: process.env.ARTIFACT_S3_KEY || "stackalert-lambda/latest.zip",
+  // Lambda code: download bootstrap.zip from GitHub Releases first.
+  // https://github.com/stackalertapp/stackalert-lambda/releases
+  lambdaCode: lambda.Code.fromAsset(process.env.LAMBDA_ASSET_PATH || "./bootstrap.zip"),
 
   telegramChatId: process.env.TELEGRAM_CHAT_ID!,
   telegramBotToken: process.env.TELEGRAM_BOT_TOKEN!,

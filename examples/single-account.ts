@@ -4,17 +4,22 @@
  * Monitors one AWS account and sends Telegram alerts when
  * any service spends 50%+ more than its 7-day average.
  *
- * Usage:
- *   export TELEGRAM_CHAT_ID=-1001234567890
- *   export TELEGRAM_BOT_TOKEN=1234567890:AAxx...
- *   export ARTIFACT_S3_BUCKET=my-stackalert-artifacts
- *   npx ts-node examples/single-account.ts
+ * Steps:
+ *   1. Download the latest Lambda binary from GitHub Releases:
+ *      curl -Lo bootstrap.zip \
+ *        $(curl -s https://api.github.com/repos/stackalertapp/stackalert-lambda/releases/latest \
+ *          | grep browser_download_url | grep arm64 | cut -d'"' -f4)
  *
- * Or deploy via CDK:
- *   cdk deploy --app "npx ts-node examples/single-account.ts"
+ *   2. Set credentials:
+ *      export TELEGRAM_CHAT_ID=-1001234567890
+ *      export TELEGRAM_BOT_TOKEN=1234567890:AAxx...
+ *
+ *   3. Deploy:
+ *      cdk deploy --app "npx ts-node examples/single-account.ts"
  */
 
 import * as cdk from "aws-cdk-lib";
+import * as lambda from "aws-cdk-lib/aws-lambda";
 import { StackAlertStack } from "../lib/stackalert-stack";
 
 const app = new cdk.App();
@@ -28,9 +33,9 @@ new StackAlertStack(app, "StackAlert-SingleAccount", {
 
   environment: "prod",
 
-  // Lambda artifact — built by stackalert-lambda CI and uploaded to S3
-  artifactS3Bucket: process.env.ARTIFACT_S3_BUCKET!,
-  artifactS3Key: process.env.ARTIFACT_S3_KEY || "stackalert-lambda/latest.zip",
+  // Lambda code: download bootstrap.zip from GitHub Releases first.
+  // https://github.com/stackalertapp/stackalert-lambda/releases
+  lambdaCode: lambda.Code.fromAsset(process.env.LAMBDA_ASSET_PATH || "./bootstrap.zip"),
 
   // Telegram: set via environment variables, never hardcode secrets
   telegramChatId: process.env.TELEGRAM_CHAT_ID!,

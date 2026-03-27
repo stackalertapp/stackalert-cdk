@@ -1,9 +1,12 @@
 import * as cdk from "aws-cdk-lib";
+import * as lambda from "aws-cdk-lib/aws-lambda";
+import * as s3 from "aws-cdk-lib/aws-s3";
 import { Template, Match } from "aws-cdk-lib/assertions";
 import { StackAlertStack } from "../lib/stackalert-stack";
 
 const defaultProps = {
   environment: "test",
+  // Use fromBucket with S3 props (backward-compat path) to avoid needing a real asset file.
   artifactS3Bucket: "my-artifacts",
   artifactS3Key: "stackalert-lambda/latest.zip",
   notificationChannels: "telegram",
@@ -47,12 +50,14 @@ describe("StackAlertStack", () => {
     });
   });
 
-  test("creates SSM parameter as SecureString", () => {
+  test("creates SSM parameter for Telegram bot token", () => {
     const template = buildStack();
 
+    // CDK StringParameter maps to SSM Type=String in CloudFormation.
+    // Sensitive values should be rotated via SSM console after first deploy.
     template.hasResourceProperties("AWS::SSM::Parameter", {
       Name: "/stackalert/test/telegram-bot-token",
-      Type: "String", // CDK StringParameter = SSM String type in CFN
+      Type: "String",
     });
   });
 
@@ -299,6 +304,80 @@ describe("StackAlertStack", () => {
           }),
         ]),
       }),
+    });
+  });
+
+  test("spike EventBridge rule passes mode=spike in event payload", () => {
+    const template = buildStack();
+
+    template.hasResourceProperties("AWS::Events::Rule", {
+      Name: "stackalert-spike-check-test",
+      Targets: Match.arrayWith([
+        Match.objectLike({
+          Input: JSON.stringify({ mode: "spike" }),
+        }),
+      ]),
+    });
+  });
+
+  test("digest EventBridge rule passes mode=digest in event payload", () => {
+    const template = buildStack();
+
+    template.hasResourceProperties("AWS::Events::Rule", {
+      Name: "stackalert-daily-digest-test",
+      Targets: Match.arrayWith([
+        Match.objectLike({
+          Input: JSON.stringify({ mode: "digest" }),
+        }),
+      ]),
+    });
+  });
+
+  test("IAM role has SSM dedup read/write permissions", () => {
+    const template = buildStack();
+
+    template.hasResourceProperties("AWS::IAM::Policy", {
+      PolicyDocument: {
+        Statement: Match.arrayWith([
+          Match.objectLike({
+            Sid: "AllowSSMDedupReadWrite",
+            Action: Match.arrayWith(["ssm:GetParameter", "ssm:PutParameter"]),
+            Effect: "Allow",
+          }),
+        ]),
+      },
+    });
+  });
+
+  test("throws when neither lambdaCode nor S3 props are provided", () => {
+    const app = new cdk.App();
+    expect(() => {
+      new StackAlertStack(app, "ThrowStack", {
+        environment: "test",
+        notificationChannels: "telegram",
+        telegramChatId: "-1001234567890",
+        telegramBotToken: "test-token",
+        env: { account: "123456789012", region: "eu-central-1" },
+      });
+    }).toThrow(/provide either `lambdaCode`/);
+  });
+
+  test("accepts lambdaCode prop instead of S3 props", () => {
+    const app = new cdk.App();
+    // Bucket references must live inside a stack scope — use a helper stack
+    const helperStack = new cdk.Stack(app, "Helper", { env: { account: "123456789012", region: "eu-central-1" } });
+    const codeBucket = s3.Bucket.fromBucketName(helperStack, "CodeBucket", "lambda-code-bucket");
+    const stack = new StackAlertStack(app, "LambdaCodeStack", {
+      environment: "test",
+      lambdaCode: lambda.Code.fromBucket(codeBucket, "bootstrap.zip"),
+      notificationChannels: "telegram",
+      telegramChatId: "-1001234567890",
+      telegramBotToken: "test-token",
+      env: { account: "123456789012", region: "eu-central-1" },
+    });
+    const template = Template.fromStack(stack);
+    template.hasResourceProperties("AWS::Lambda::Function", {
+      FunctionName: "stackalert-test",
     });
   });
 });
